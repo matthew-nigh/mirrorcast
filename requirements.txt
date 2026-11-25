@@ -1,0 +1,4 @@
+PyChromecast>=14,<15
+imageio-ffmpeg>=0.6
+soundcard>=0.4.4
+numpy>=1.24

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit and pipeline tests (real screen capture)
+        env:
+          CCMIRROR_REAL_CAPTURE: "1"
+        run: pytest -v -s
+
+      - name: Self-test from source (captures the runner's screen)
+        run: python main.py --selftest --seconds 4
+
+      - name: Build the .exe
+        run: pyinstaller --noconfirm --clean ChromecastMirror.spec
+
+      - name: Self-test the built .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\ChromecastMirror.exe -ArgumentList "--selftest","--seconds","4" -Wait -PassThru
+          Write-Host "exit code $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChromecastMirror-exe
+          path: dist/ChromecastMirror.exe
+          if-no-files-found: error
