@@ -23,8 +23,14 @@ from .platform_utils import CREATE_NO_WINDOW, IS_WINDOWS, Monitor
 
 Log = Callable[[str], None]
 
-PLAYLIST = "stream.m3u8"
-SEGMENT_SECONDS = 1
+PLAYLIST = "stream.m3u8"        # media playlist (the list of video segments)
+MASTER_PLAYLIST = "index.m3u8"  # what the Chromecast is given: names the codecs
+# Cast receivers start a live stream about 3 segments behind the newest one and
+# can't buffer further ahead than that. With 1-second segments that is only ~3 s,
+# less than the receiver wants before it starts, so it buffered forever on a
+# black screen. 2-second segments give it ~6 s.
+SEGMENT_SECONDS = 2
+PLAYLIST_SEGMENTS = 8           # segments listed in the live playlist (16 s window)
 
 # Labels shown in the GUI -> (max width, max height, video bitrate kbit/s)
 QUALITY = {
@@ -42,6 +48,8 @@ ENCODER_CHOICES = {
 }
 DEFAULT_ENCODER = "Auto (try graphics card, then CPU)"
 
+DEFAULT_PORT = 8765  # the stream server's port (the firewall rule opens this one)
+
 AUDIO_NONE = "No sound"
 AUDIO_LOOPBACK = "PC sound (what you hear)"
 
@@ -49,7 +57,7 @@ AUDIO_LOOPBACK = "PC sound (what you hear)"
 # --------------------------------------------------------------------------- ffmpeg
 
 def ffmpeg_path() -> str:
-    override = os.environ.get("CCMIRROR_FFMPEG")
+    override = os.environ.get("MIRRORCAST_FFMPEG")
     if override:
         return override
     try:
@@ -107,17 +115,21 @@ def _encoder_args(encoder: str, bitrate_k: int, fps: int) -> tuple[list[str], st
     """Returns (ffmpeg args, pixel format the encoder wants)."""
     rate = [
         "-b:v", f"{bitrate_k}k", "-maxrate", f"{bitrate_k}k",
-        "-bufsize", f"{bitrate_k * 2}k", "-g", str(fps), "-bf", "0",
+        "-bufsize", f"{bitrate_k * 2}k", "-g", str(fps * SEGMENT_SECONDS), "-bf", "0",
     ]
+    # Every segment must start with an IDR frame (plus SPS/PPS) so the Chromecast
+    # can start decoding mid-stream. libx264 does that for forced keyframes; the
+    # graphics-card encoders turn forced keyframes into plain I-frames unless told.
     if encoder == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p3", "-tune", "ll",
-                "-profile:v", "high", "-rc", "cbr"] + rate, "yuv420p"
+                "-profile:v", "high", "-rc", "cbr", "-forced-idr", "1"] + rate, "yuv420p"
     if encoder == "h264_qsv":
         return ["-c:v", "h264_qsv", "-preset", "veryfast",
-                "-profile:v", "high"] + rate, "nv12"
+                "-profile:v", "high", "-forced_idr", "1", "-idr_interval", "0"] + rate, "nv12"
     if encoder == "h264_amf":
         return ["-c:v", "h264_amf", "-usage", "lowlatency", "-quality", "speed",
-                "-profile:v", "high"] + rate, "yuv420p"
+                "-profile:v", "high", "-forced_idr", "1",
+                "-header_spacing", str(fps * SEGMENT_SECONDS)] + rate, "yuv420p"
     return ["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
             "-profile:v", "high", "-level:v", "4.1"] + rate, "yuv420p"
 
@@ -172,9 +184,10 @@ def build_ffmpeg_command(
     cmd += ["-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_SECONDS})"]
     cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"]
     cmd += ["-max_muxing_queue_size", "1024",
-            "-f", "hls", "-hls_time", str(SEGMENT_SECONDS), "-hls_list_size", "6",
-            "-hls_flags", "delete_segments+independent_segments+omit_endlist",
-            "-hls_segment_type", "mpegts",
+            "-f", "hls", "-hls_time", str(SEGMENT_SECONDS),
+            "-hls_list_size", str(PLAYLIST_SEGMENTS), "-hls_delete_threshold", "4",
+            "-hls_flags", "delete_segments+independent_segments+omit_endlist+temp_file",
+            "-hls_segment_type", "mpegts", "-master_pl_name", MASTER_PLAYLIST,
             "-hls_segment_filename", os.path.join(out_dir, "seg_%05d.ts"),
             os.path.join(out_dir, PLAYLIST)]
     return cmd
@@ -185,6 +198,33 @@ def count_segments(playlist_text: str) -> int:
 
 
 # --------------------------------------------------------------------------- HTTP
+
+class FetchLog:
+    """Counts what has been downloaded from the stream server, so we can tell
+    "the TV never reached the PC" (firewall) apart from "it reached it but
+    won't play" (format problem)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        with self._lock:
+            self.playlists = 0
+            self.segments = 0
+            self.clients: set[str] = set()
+
+    def record(self, client: str, path: str) -> None:
+        name = path.split("?", 1)[0].rsplit("/", 1)[-1]
+        with self._lock:
+            if name.endswith(".m3u8"):
+                self.playlists += 1
+            elif name.endswith(".ts"):
+                self.segments += 1
+            else:
+                return
+            self.clients.add(client)
+
 
 class _Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {
@@ -199,6 +239,12 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Cache-Control", "no-cache, no-store")
         super().end_headers()
+
+    def send_head(self):
+        fetch_log = getattr(self.server, "fetch_log", None)
+        if fetch_log is not None:
+            fetch_log.record(self.client_address[0], self.path)
+        return super().send_head()
 
     def do_OPTIONS(self) -> None:  # CORS preflight
         self.send_response(204)
@@ -217,13 +263,14 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 class HlsServer:
     """Serves one folder on all network interfaces."""
 
-    def __init__(self, directory: str, port: int = 8765):
+    def __init__(self, directory: str, port: int = DEFAULT_PORT):
         handler = functools.partial(_Handler, directory=directory)
         try:
             self.httpd = http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
         except OSError:
             self.httpd = http.server.ThreadingHTTPServer(("0.0.0.0", 0), handler)
         self.httpd.daemon_threads = True
+        self.fetch_log = self.httpd.fetch_log = FetchLog()
         self.port = self.httpd.server_address[1]
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
@@ -246,7 +293,7 @@ class MirrorStream:
     """Runs ffmpeg + the HTTP server. start() returns once the stream is playable."""
 
     log: Log = print
-    ready_segments: int = 2
+    ready_segments: int = 3
     attempt_timeout: float = 12.0
     last_working: Optional[Attempt] = None
     out_dir: Optional[str] = field(default=None, init=False)
@@ -262,7 +309,7 @@ class MirrorStream:
               fps: int = 30, test_pattern: bool = False) -> None:
         self.stop()
         ffmpeg = ffmpeg_path()
-        self.out_dir = tempfile.mkdtemp(prefix="ccmirror_")
+        self.out_dir = tempfile.mkdtemp(prefix="mirrorcast_")
         self.server = HlsServer(self.out_dir)
         self.server.start()
 
@@ -314,7 +361,8 @@ class MirrorStream:
                 return False, self._last_error() or f"ffmpeg exited ({self.proc.returncode})"
             try:
                 with open(playlist, encoding="utf-8", errors="replace") as fh:
-                    if count_segments(fh.read()) >= self.ready_segments:
+                    if (count_segments(fh.read()) >= self.ready_segments
+                            and os.path.exists(os.path.join(self.out_dir, MASTER_PLAYLIST))):
                         return True, ""
             except OSError:
                 pass
@@ -334,10 +382,15 @@ class MirrorStream:
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def url(self, host_ip: str) -> str:
+    def url(self, host_ip: str, playlist: str = MASTER_PLAYLIST) -> str:
+        """Address of the stream on the LAN. The Chromecast gets the master playlist."""
         if not self.server:
             raise StreamError("stream not started")
-        return f"http://{host_ip}:{self.server.port}/{PLAYLIST}"
+        return f"http://{host_ip}:{self.server.port}/{playlist}"
+
+    @property
+    def fetch_log(self) -> Optional[FetchLog]:
+        return self.server.fetch_log if self.server else None
 
     def recent_errors(self) -> str:
         return "\n".join(self._stderr)

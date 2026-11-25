@@ -11,16 +11,20 @@ from .platform_utils import IS_WINDOWS, enable_dpi_awareness, list_monitors, loc
 
 
 def selftest(seconds: float, test_pattern: bool, encoder: str) -> int:
-    from .streamer import MirrorStream, StreamError, count_segments
+    from .streamer import PLAYLIST, MirrorStream, StreamError, count_segments
 
     stream = MirrorStream(log=print)
     monitor = list_monitors()[0]
     print(f"Capturing {monitor.label} ...")
     try:
         stream.start(monitor, encoder_choice=encoder, test_pattern=test_pattern)
-        url = stream.url(local_ip_towards(None))
-        print(f"Stream URL: {url}")
+        master_url = stream.url(local_ip_towards(None))
+        print(f"Stream URL: {master_url}")
         time.sleep(seconds)
+        with urllib.request.urlopen(master_url, timeout=5) as resp:
+            master = resp.read().decode()
+        codecs_ok = "avc1." in master and "mp4a." in master and PLAYLIST in master
+        url = stream.url(local_ip_towards(None), PLAYLIST)
         with urllib.request.urlopen(url, timeout=5) as resp:
             body = resp.read().decode()
             cors = resp.headers.get("Access-Control-Allow-Origin")
@@ -29,8 +33,9 @@ def selftest(seconds: float, test_pattern: bool, encoder: str) -> int:
         seg_url = url.rsplit("/", 1)[0] + "/" + first_seg
         with urllib.request.urlopen(seg_url, timeout=5) as resp:
             size = len(resp.read())
-        print(f"Playlist has {n} segments, CORS={cors}, first segment {size} bytes")
-        ok = n >= 2 and cors == "*" and size > 1000 and stream.running
+        print(f"Playlist has {n} segments, CORS={cors}, first segment {size} bytes, "
+              f"codecs listed={codecs_ok}")
+        ok = n >= 2 and cors == "*" and size > 1000 and codecs_ok and stream.running
         print("SELFTEST PASSED" if ok else "SELFTEST FAILED")
         return 0 if ok else 1
     except (StreamError, OSError, IndexError) as exc:
@@ -42,7 +47,7 @@ def selftest(seconds: float, test_pattern: bool, encoder: str) -> int:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="ChromecastMirror")
+    parser = argparse.ArgumentParser(prog="MirrorCast")
     parser.add_argument("--selftest", action="store_true",
                         help="check screen capture and the stream server, then exit")
     parser.add_argument("--test-pattern", action="store_true",

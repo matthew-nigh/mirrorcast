@@ -1,14 +1,14 @@
 """End-to-end: real ffmpeg -> HLS -> HTTP, using a test picture (or the real
-screen when CCMIRROR_REAL_CAPTURE=1, as on the Windows CI runner)."""
+screen when MIRRORCAST_REAL_CAPTURE=1, as on the Windows CI runner)."""
 
 import os
 import time
 import urllib.request
 
-from chromecast_mirror.platform_utils import list_monitors
-from chromecast_mirror.streamer import AUDIO_LOOPBACK, MirrorStream, count_segments
+from mirrorcast.platform_utils import list_monitors
+from mirrorcast.streamer import AUDIO_LOOPBACK, PLAYLIST, MirrorStream, count_segments
 
-REAL = os.environ.get("CCMIRROR_REAL_CAPTURE") == "1"
+REAL = os.environ.get("MIRRORCAST_REAL_CAPTURE") == "1"
 
 
 def _run(**kw):
@@ -19,8 +19,12 @@ def _run(**kw):
         time.sleep(2)
         assert stream.running
         with urllib.request.urlopen(stream.url("127.0.0.1"), timeout=5) as r:
+            master = r.read().decode()  # what the Chromecast is given
+        assert "CODECS=" in master and "avc1." in master and PLAYLIST in master
+        with urllib.request.urlopen(stream.url("127.0.0.1", PLAYLIST), timeout=5) as r:
             body = r.read().decode()
-        assert count_segments(body) >= 2
+        assert count_segments(body) >= 3
+        assert "#EXT-X-TARGETDURATION:2" in body
         return stream.attempt
     finally:
         stream.stop()

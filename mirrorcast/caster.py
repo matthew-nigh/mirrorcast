@@ -7,11 +7,21 @@ import time
 from typing import Callable, Optional
 
 HLS_CONTENT_TYPE = "application/x-mpegURL"
+# Tell the receiver the segments are MPEG-TS with H.264 + AAC inside, instead of
+# letting it guess (a wrong guess means it buffers forever on a black screen).
+HLS_MEDIA_INFO = {"hlsSegmentFormat": "ts", "hlsVideoSegmentFormat": "mpeg2_ts"}
 SKIP_CAST_TYPES = {"audio", "group"}  # speakers and speaker groups can't show video
+
+FIREWALL_HINT = ("Windows Firewall is probably blocking it. Allow MirrorCast on Private "
+                 "networks, or make sure your Wi-Fi is set to Private, then try again.")
 
 
 class CastError(RuntimeError):
     pass
+
+
+class FirewallError(CastError):
+    """The Chromecast accepted the stream but never downloaded any of it."""
 
 
 class CastManager:
@@ -76,8 +86,13 @@ class CastManager:
             self._browser = None
 
     # -- playback
-    def play(self, uuid: str, url: str, title: str = "Windows screen",
-             wait_s: float = 25.0) -> None:
+    def play(self, uuid: str, url: str, title: str = "MirrorCast",
+             wait_s: float = 30.0, fetch_log=None) -> str:
+        """Start the stream on a Chromecast and wait until the picture is showing.
+
+        fetch_log (the stream server's FetchLog) lets us tell whether the TV ever
+        reached the PC. Returns the final player state ("PLAYING" when all is well).
+        """
         cast = self.devices.get(uuid)
         if cast is None:
             raise CastError("That Chromecast is no longer on the list. Press Refresh.")
@@ -87,26 +102,55 @@ class CastManager:
         except Exception as exc:
             raise CastError(f"Couldn't connect to {cast.name}: {exc}") from exc
         mc = cast.media_controller
+        if fetch_log is not None:
+            fetch_log.reset()
         self.log(f"Asking {cast.name} to play {url}")
-        mc.play_media(url, HLS_CONTENT_TYPE, title=title, stream_type="LIVE")
+        mc.play_media(url, HLS_CONTENT_TYPE, title=title, stream_type="LIVE",
+                      media_info=dict(HLS_MEDIA_INFO))
         try:
             mc.block_until_active(timeout=20)
         except Exception:
             pass
         self.active = cast
-        deadline = time.monotonic() + wait_s
+
+        def fetched() -> tuple[int, int]:
+            if fetch_log is None:
+                return -1, -1  # unknown
+            return fetch_log.playlists, fetch_log.segments
+
+        start = time.monotonic()
+        deadline = start + wait_s
+        firewall_check_at = start + min(15.0, wait_s)
+        last_state = None
         while time.monotonic() < deadline:
             status = mc.status
             state = getattr(status, "player_state", None)
-            if state in ("PLAYING", "BUFFERING"):
-                self.log(f"{cast.name} is {state.lower()}.")
-                return
+            if state != last_state and state:
+                self.log(f"{cast.name}: {state.lower()}")
+                last_state = state
+            playlists, segments = fetched()
+            if state == "PLAYING":
+                return state
             if state == "IDLE" and getattr(status, "idle_reason", None) == "ERROR":
+                if playlists <= 0:  # nothing fetched, or we can't tell
+                    raise FirewallError(
+                        f"{cast.name} couldn't load the video from this PC. "
+                        + FIREWALL_HINT)
                 raise CastError(
-                    f"{cast.name} couldn't load the stream. This usually means Windows "
-                    "Firewall is blocking the app: allow it on Private networks.")
+                    f"{cast.name} downloaded the video but couldn't play it. "
+                    "Try setting Encoder to CPU.")
+            if playlists == 0 and time.monotonic() >= firewall_check_at:
+                raise FirewallError(
+                    f"{cast.name} hasn't downloaded anything from this PC after "
+                    f"{int(firewall_check_at - start)} seconds. " + FIREWALL_HINT)
             time.sleep(0.5)
-        self.log(f"{cast.name} hasn't confirmed playback yet; it may still start.")
+        playlists, segments = fetched()
+        if segments > 0:
+            self.log(f"{cast.name} is downloading the video but hasn't started showing "
+                     "it yet. If the TV stays black, set Encoder to CPU and try again.")
+        else:
+            self.log(f"{cast.name} hasn't confirmed playback yet; it may still start.")
+        return last_state or "UNKNOWN"
 
     def stop_playback(self) -> None:
         cast, self.active = self.active, None

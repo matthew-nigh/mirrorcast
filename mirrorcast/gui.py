@@ -9,12 +9,20 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from . import APP_NAME, __version__
-from .platform_utils import app_data_dir, list_monitors, local_ip_towards
+from . import APP_NAME, PUBLISHER, __version__
+from .caster import FirewallError
+from .platform_utils import (
+    IS_WINDOWS,
+    allow_through_firewall,
+    app_data_dir,
+    list_monitors,
+    local_ip_towards,
+)
 from .streamer import (
     AUDIO_LOOPBACK,
     AUDIO_NONE,
     DEFAULT_ENCODER,
+    DEFAULT_PORT,
     DEFAULT_QUALITY,
     ENCODER_CHOICES,
     QUALITY,
@@ -23,7 +31,7 @@ from .streamer import (
     list_dshow_audio_devices,
 )
 
-log = logging.getLogger("ccmirror")
+log = logging.getLogger("mirrorcast")
 
 
 class App:
@@ -102,6 +110,10 @@ class App:
         self.log_box = tk.Text(frm, height=8, state="disabled", wrap="word")
         self.log_box.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
         frm.rowconfigure(8, weight=1)
+
+        ttk.Label(frm, text=f"{APP_NAME} {__version__} \u00b7 Published by {PUBLISHER}",
+                  foreground="gray").grid(row=9, column=0, columnspan=3, sticky="e",
+                                          padx=8, pady=(0, 2))
 
     # ------------------------------------------------------------------ helpers
     def _ui(self, fn, *args) -> None:
@@ -216,9 +228,14 @@ class App:
             host = self.casts.host_of(uuid)
             url = self.stream.url(local_ip_towards(host))
             self._status("Sending to the Chromecast...")
-            self.casts.play(uuid, url)
+            state = self.casts.play(uuid, url, title=APP_NAME,
+                                    fetch_log=self.stream.fetch_log)
             self.mirroring = True
-            self._status("Mirroring. Expect the TV to run a few seconds behind the PC.")
+            if state == "PLAYING":
+                self._status("Mirroring. Expect the TV to run a few seconds behind the PC.")
+            else:
+                self._status("Sent to the TV, still waiting for the picture. "
+                             "See the details below.")
         except Exception as exc:
             log.exception("start failed")
             self.stream.stop()
@@ -228,8 +245,28 @@ class App:
             self._log(f"Error: {exc}")
             if isinstance(exc, StreamError):
                 self._log(self.stream.recent_errors())
+            if isinstance(exc, FirewallError) and IS_WINDOWS:
+                self._ui(self._offer_firewall_fix)
         finally:
             self._ui(self._set_busy, False)
+
+    def _offer_firewall_fix(self) -> None:
+        if not messagebox.askyesno(
+                APP_NAME,
+                "The Chromecast couldn't fetch the video from this PC, which usually "
+                "means Windows Firewall is blocking it.\n\n"
+                f"Allow devices on your home network to reach {APP_NAME}? Windows will "
+                "ask for permission."):
+            return
+
+        def work():
+            if allow_through_firewall(DEFAULT_PORT):
+                self._log("Firewall rule added. Press Start mirroring again.")
+                self._status("Firewall rule added. Press Start mirroring again.")
+            else:
+                self._log("The firewall rule wasn't added (cancelled or not allowed).")
+
+        threading.Thread(target=self._safe, args=(work,), daemon=True).start()
 
     def _stop(self) -> None:
         self._set_busy(True, "Stopping...")

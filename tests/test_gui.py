@@ -12,7 +12,7 @@ def test_window_opens_and_closes():
         root = tk.Tk()
     except tk.TclError:
         pytest.skip("no display")
-    from chromecast_mirror.gui import App
+    from mirrorcast.gui import App
 
     app = App(root)
     assert app.start_btn["text"] == "Start mirroring"
@@ -23,7 +23,7 @@ def test_window_opens_and_closes():
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
 def test_monitor_list_on_windows():
-    from chromecast_mirror.platform_utils import list_monitors
+    from mirrorcast.platform_utils import list_monitors
 
     mons = list_monitors()
     assert mons[0].primary and mons[0].width > 0 and mons[0].height > 0

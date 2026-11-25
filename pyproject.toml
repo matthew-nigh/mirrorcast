@@ -1,3 +1,11 @@
+[project]
+name = "mirrorcast"
+version = "1.1.0"
+description = "Mirror a Windows screen to a Chromecast"
+authors = [{ name = "M. Nigh" }]
+readme = "README.md"
+requires-python = ">=3.10"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -3,8 +3,8 @@ import urllib.request
 
 import pytest
 
-from chromecast_mirror import streamer as st
-from chromecast_mirror.platform_utils import Monitor
+from mirrorcast import streamer as st
+from mirrorcast.platform_utils import Monitor
 
 MON = Monitor(1, 1920, 0, 2560, 1440, False)
 
@@ -68,8 +68,20 @@ def test_hls_output_settings():
     cmd = _cmd()
     assert cmd[-1] == os.path.join("OUT", st.PLAYLIST)
     assert cmd[cmd.index("-f", cmd.index("-max_muxing_queue_size")) + 1] == "hls"
-    assert cmd[cmd.index("-hls_time") + 1] == "1"
-    assert "delete_segments" in cmd[cmd.index("-hls_flags") + 1]
+    # 1-second segments left Cast receivers buffering forever (see SEGMENT_SECONDS)
+    assert cmd[cmd.index("-hls_time") + 1] == str(st.SEGMENT_SECONDS) == "2"
+    flags = cmd[cmd.index("-hls_flags") + 1]
+    assert "delete_segments" in flags and "temp_file" in flags
+    assert cmd[cmd.index("-master_pl_name") + 1] == st.MASTER_PLAYLIST
+    assert cmd[cmd.index("-g") + 1] == "60"  # a keyframe at every segment start
+    assert "expr:gte(t,n_forced*2)" in cmd
+
+
+@pytest.mark.parametrize("encoder,flag", [
+    ("h264_nvenc", "-forced-idr"), ("h264_qsv", "-forced_idr"), ("h264_amf", "-forced_idr")])
+def test_gpu_encoders_start_segments_with_idr_frames(encoder, flag):
+    cmd = _cmd(attempt=st.Attempt("gdigrab", encoder))
+    assert cmd[cmd.index(flag) + 1] == "1"
 
 
 @pytest.mark.parametrize("audio,expect", [
@@ -101,15 +113,26 @@ def test_hls_server_serves_with_cors(tmp_path):
         with urllib.request.urlopen(base + "seg_00000.ts", timeout=5) as r:
             assert r.headers["Content-Type"] == "video/mp2t"
             assert len(r.read()) == 188
+        log = server.fetch_log
+        assert (log.playlists, log.segments, log.clients) == (1, 1, {"127.0.0.1"})
+        log.reset()
+        assert (log.playlists, log.segments) == (0, 0)
     finally:
         server.stop()
 
 
+def test_fetch_log_ignores_other_files():
+    log = st.FetchLog()
+    log.record("10.0.0.5", "/index.m3u8?x=1")
+    log.record("10.0.0.5", "/favicon.ico")
+    assert (log.playlists, log.segments, log.clients) == (1, 0, {"10.0.0.5"})
+
+
 def test_ffmpeg_path_override(monkeypatch):
-    monkeypatch.setenv("CCMIRROR_FFMPEG", "C:/x/ffmpeg.exe")
+    monkeypatch.setenv("MIRRORCAST_FFMPEG", "C:/x/ffmpeg.exe")
     assert st.ffmpeg_path() == "C:/x/ffmpeg.exe"
 
 
 def test_bundled_ffmpeg_found(monkeypatch):
-    monkeypatch.delenv("CCMIRROR_FFMPEG", raising=False)
+    monkeypatch.delenv("MIRRORCAST_FFMPEG", raising=False)
     assert os.path.exists(st.ffmpeg_path())

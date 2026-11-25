@@ -3,7 +3,7 @@ import uuid as uuidlib
 
 import pytest
 
-from chromecast_mirror.caster import HLS_CONTENT_TYPE, CastError, CastManager
+from mirrorcast.caster import HLS_CONTENT_TYPE, CastError, CastManager, FirewallError
 
 
 class FakeMedia:
@@ -109,3 +109,66 @@ def test_play_unknown_device():
     mgr, _ = make([])
     with pytest.raises(CastError):
         mgr.play("missing", "http://x")
+
+
+class FakeFetchLog:
+    """Stands in for the stream server's FetchLog."""
+
+    def __init__(self, playlists=0, segments=0):
+        self.playlists, self.segments = playlists, segments
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+
+def _started(states):
+    tv = FakeCast("Living Room", states=states)
+    mgr, _ = make([tv])
+    mgr.start_discovery()
+    return mgr, tv
+
+
+def test_play_tells_receiver_the_segment_format():
+    mgr, tv = _started([("PLAYING", None)])
+    mgr.play(str(tv.uuid), "http://x/index.m3u8", wait_s=2)
+    _, _, kw = tv.media_controller.played
+    assert kw["media_info"]["hlsSegmentFormat"] == "ts"
+    assert kw["media_info"]["hlsVideoSegmentFormat"] == "mpeg2_ts"
+
+
+def test_play_waits_through_buffering_until_playing():
+    mgr, tv = _started([("BUFFERING", None)] * 3 + [("PLAYING", None)])
+    fetch = FakeFetchLog(playlists=2, segments=3)
+    assert mgr.play(str(tv.uuid), "http://x", wait_s=10, fetch_log=fetch) == "PLAYING"
+    assert fetch.resets == 1  # counts start fresh for each play
+
+
+def test_play_reports_firewall_when_tv_never_fetches(monkeypatch):
+    mgr, tv = _started([("BUFFERING", None)])
+    clock = iter(range(0, 1000, 5))  # each check is 5 "seconds" later
+    monkeypatch.setattr("mirrorcast.caster.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("mirrorcast.caster.time.sleep", lambda s: None)
+    with pytest.raises(FirewallError, match="Firewall"):
+        mgr.play(str(tv.uuid), "http://x", wait_s=30, fetch_log=FakeFetchLog())
+
+
+def test_play_buffering_but_fetching_is_not_a_firewall_problem(monkeypatch):
+    mgr, tv = _started([("BUFFERING", None)])
+    logs = []
+    mgr.log = logs.append
+    clock = iter(range(0, 1000, 5))
+    monkeypatch.setattr("mirrorcast.caster.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("mirrorcast.caster.time.sleep", lambda s: None)
+    state = mgr.play(str(tv.uuid), "http://x", wait_s=30,
+                     fetch_log=FakeFetchLog(playlists=5, segments=4))
+    assert state == "BUFFERING"
+    assert any("Encoder to CPU" in m for m in logs)
+
+
+def test_play_error_after_download_suggests_cpu_encoder():
+    mgr, tv = _started([("IDLE", "ERROR")])
+    with pytest.raises(CastError, match="Encoder to CPU") as info:
+        mgr.play(str(tv.uuid), "http://x", wait_s=2,
+                 fetch_log=FakeFetchLog(playlists=3, segments=2))
+    assert not isinstance(info.value, FirewallError)

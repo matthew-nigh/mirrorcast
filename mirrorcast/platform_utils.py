@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -89,7 +90,7 @@ def list_monitors() -> list[Monitor]:
 
 def app_data_dir() -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "ChromecastMirror")
+    path = os.path.join(base, "MirrorCast")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -105,6 +106,43 @@ def local_ip_towards(remote_host: str | None) -> str:
         return socket.gethostbyname(socket.gethostname())
     finally:
         s.close()
+
+
+FIREWALL_RULE_NAME = "MirrorCast"  # no spaces: keeps the netsh quoting simple
+
+
+def firewall_rule_commands(port: int) -> list[list[str]]:
+    """netsh commands that let devices on the local network fetch the stream.
+
+    Only the stream port, only from the local subnet (the Chromecast), on every
+    network profile, because home Wi-Fi is often marked "Public" in Windows.
+    Nothing listens on the port unless MirrorCast is mirroring.
+    """
+    base = ["netsh", "advfirewall", "firewall"]
+    return [
+        base + ["delete", "rule", f"name={FIREWALL_RULE_NAME}"],
+        base + ["add", "rule", f"name={FIREWALL_RULE_NAME}", "dir=in", "action=allow",
+                "protocol=TCP", f"localport={port}", "remoteip=localsubnet",
+                "profile=any"],
+    ]
+
+
+def allow_through_firewall(port: int) -> bool:
+    """Add the firewall rule. Windows shows its usual "allow changes?" prompt.
+    Returns True if the rule was added."""
+    if not IS_WINDOWS:
+        return False
+    # One elevated cmd.exe runs both netsh commands, so there is only one prompt.
+    inner = " & ".join(" ".join(cmd) for cmd in firewall_rule_commands(port))
+    script = ("$p = Start-Process -FilePath cmd.exe -Verb RunAs -Wait -PassThru "
+              f"-WindowStyle Hidden -ArgumentList '/c {inner}'; exit $p.ExitCode")
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, timeout=120, creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def resource_frozen() -> bool:

@@ -1,8 +1,8 @@
-"""Start Chromecast Mirror (double-click run.bat, or `python main.py`)."""
+"""Start MirrorCast (double-click run.bat, or `python main.py`)."""
 
 import sys
 
-from chromecast_mirror.cli import main
+from mirrorcast.cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

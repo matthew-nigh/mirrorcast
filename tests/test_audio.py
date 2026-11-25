@@ -1,6 +1,6 @@
 import io
 
-from chromecast_mirror.audio_loopback import SAMPLE_RATE, LoopbackAudio, pad_frames_needed
+from mirrorcast.audio_loopback import SAMPLE_RATE, LoopbackAudio, pad_frames_needed
 
 
 def test_no_padding_when_on_time():
