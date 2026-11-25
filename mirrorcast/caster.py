@@ -6,11 +6,28 @@ import threading
 import time
 from typing import Callable, Optional
 
-HLS_CONTENT_TYPE = "application/x-mpegURL"
+from .streamer import HLS_CONTENT_TYPE
+
 # Tell the receiver the segments are MPEG-TS with H.264 + AAC inside, instead of
 # letting it guess (a wrong guess means it buffers forever on a black screen).
 HLS_MEDIA_INFO = {"hlsSegmentFormat": "ts", "hlsVideoSegmentFormat": "mpeg2_ts"}
 SKIP_CAST_TYPES = {"audio", "group"}  # speakers and speaker groups can't show video
+CMD_SUPPORT_PLAYBACK_RATE = 8192      # receiver can change playback speed
+
+# Lowest-delay mode: if the TV built up a buffer (and so a delay), play slightly
+# fast until it has caught up. Audio pitch is kept; 10% faster is hard to notice.
+CATCH_UP_START = 1.5  # seconds behind: start catching up
+CATCH_UP_STOP = 1.0   # seconds behind: back to normal speed
+CATCH_UP_RATE = 1.1
+
+
+def catch_up_rate(delay_s: float, current_rate: float) -> float:
+    """Playback speed the TV should use, given how far behind the PC it is."""
+    if delay_s > CATCH_UP_START:
+        return CATCH_UP_RATE
+    if delay_s < CATCH_UP_STOP:
+        return 1.0
+    return current_rate
 
 FIREWALL_HINT = ("Windows Firewall is probably blocking it. Allow MirrorCast on Private "
                  "networks, or make sure your Wi-Fi is set to Private, then try again.")
@@ -87,7 +104,8 @@ class CastManager:
 
     # -- playback
     def play(self, uuid: str, url: str, title: str = "MirrorCast",
-             wait_s: float = 30.0, fetch_log=None) -> str:
+             wait_s: float = 30.0, fetch_log=None,
+             content_type: str = HLS_CONTENT_TYPE) -> str:
         """Start the stream on a Chromecast and wait until the picture is showing.
 
         fetch_log (the stream server's FetchLog) lets us tell whether the TV ever
@@ -105,8 +123,9 @@ class CastManager:
         if fetch_log is not None:
             fetch_log.reset()
         self.log(f"Asking {cast.name} to play {url}")
-        mc.play_media(url, HLS_CONTENT_TYPE, title=title, stream_type="LIVE",
-                      media_info=dict(HLS_MEDIA_INFO))
+        hls = content_type == HLS_CONTENT_TYPE
+        mc.play_media(url, content_type, title=title, stream_type="LIVE",
+                      media_info=dict(HLS_MEDIA_INFO) if hls else None)
         try:
             mc.block_until_active(timeout=20)
         except Exception:
@@ -151,6 +170,38 @@ class CastManager:
         else:
             self.log(f"{cast.name} hasn't confirmed playback yet; it may still start.")
         return last_state or "UNKNOWN"
+
+    def playback_position(self) -> Optional[float]:
+        """Where the TV is in the video (seconds), or None if it isn't playing.
+
+        Also asks the TV for a fresh status, so the next call is more accurate.
+        """
+        cast = self.active
+        if cast is None:
+            return None
+        mc = cast.media_controller
+        try:
+            mc.update_status()
+        except Exception:
+            pass
+        status = mc.status
+        if getattr(status, "player_state", None) != "PLAYING":
+            return None
+        return getattr(status, "adjusted_current_time", None)
+
+    def set_playback_rate(self, rate: float) -> bool:
+        """Change the TV's playback speed. False if it can't (or refused)."""
+        cast = self.active
+        if cast is None:
+            return False
+        mc = cast.media_controller
+        if not getattr(mc.status, "supported_media_commands", 0) & CMD_SUPPORT_PLAYBACK_RATE:
+            return False
+        try:
+            mc.set_playback_rate(rate, timeout=5)
+        except Exception:
+            return False
+        return True
 
     def stop_playback(self) -> None:
         cast, self.active = self.active, None

@@ -68,8 +68,8 @@ def test_hls_output_settings():
     cmd = _cmd()
     assert cmd[-1] == os.path.join("OUT", st.PLAYLIST)
     assert cmd[cmd.index("-f", cmd.index("-max_muxing_queue_size")) + 1] == "hls"
-    # 1-second segments left Cast receivers buffering forever (see SEGMENT_SECONDS)
-    assert cmd[cmd.index("-hls_time") + 1] == str(st.SEGMENT_SECONDS) == "2"
+    # the default (Standard) mode: 2-second segments, known to work on Chromecasts
+    assert cmd[cmd.index("-hls_time") + 1] == "2"
     flags = cmd[cmd.index("-hls_flags") + 1]
     assert "delete_segments" in flags and "temp_file" in flags
     assert cmd[cmd.index("-master_pl_name") + 1] == st.MASTER_PLAYLIST
@@ -102,7 +102,7 @@ def test_count_segments():
 def test_hls_server_serves_with_cors(tmp_path):
     (tmp_path / "stream.m3u8").write_text("#EXTM3U\n")
     (tmp_path / "seg_00000.ts").write_bytes(b"\x47" * 188)
-    server = st.HlsServer(str(tmp_path), port=0)
+    server = st.StreamServer(str(tmp_path), port=0)
     server.start()
     try:
         base = f"http://127.0.0.1:{server.port}/"
@@ -136,3 +136,38 @@ def test_ffmpeg_path_override(monkeypatch):
 def test_bundled_ffmpeg_found(monkeypatch):
     monkeypatch.delenv("MIRRORCAST_FFMPEG", raising=False)
     assert os.path.exists(st.ffmpeg_path())
+
+
+def test_delay_modes_and_auto_order():
+    assert st.delay_attempts(st.DELAY_AUTO) == [st.DELAY_LOWEST, st.DELAY_LOW, st.DELAY_STANDARD]
+    assert st.delay_attempts(st.DELAY_LOW) == [st.DELAY_LOW]
+    assert st.DELAY_MODES[st.DELAY_LOWEST].kind == "mp4"
+    assert st.DELAY_MODES[st.DELAY_LOW] == st.DelayMode("hls", 1)
+
+
+def test_lowest_delay_writes_fragmented_mp4_to_stdout():
+    cmd = _cmd(mode=st.DELAY_MODES[st.DELAY_LOWEST])
+    assert cmd[-1] == "pipe:1"
+    assert cmd[cmd.index("-f", cmd.index("-max_muxing_queue_size")) + 1] == "mp4"
+    assert "empty_moov" in cmd[cmd.index("-movflags") + 1]
+    assert cmd[cmd.index("-frag_duration") + 1] == "100000"  # 0.1 s fragments
+    assert cmd[cmd.index("-g") + 1] == "30"  # a keyframe every second at 30 fps
+    assert "-hls_time" not in cmd
+
+
+def test_low_delay_uses_one_second_segments():
+    cmd = _cmd(mode=st.DELAY_MODES[st.DELAY_LOW])
+    assert cmd[cmd.index("-hls_time") + 1] == "1"
+    assert cmd[cmd.index("-g") + 1] == "30"
+
+
+@pytest.mark.parametrize("encoder,flags", [
+    ("h264_nvenc", {"-tune": "ull", "-zerolatency": "1", "-delay": "0"}),
+    ("h264_qsv", {"-async_depth": "1", "-look_ahead": "0"}),
+    ("h264_amf", {"-usage": "ultralowlatency"}),
+    ("libx264", {"-tune": "zerolatency", "-bf": "0"}),
+])
+def test_encoders_hand_frames_over_immediately(encoder, flags):
+    cmd = _cmd(attempt=st.Attempt("gdigrab", encoder))
+    for flag, value in flags.items():
+        assert cmd[cmd.index(flag) + 1] == value

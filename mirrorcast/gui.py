@@ -10,24 +10,30 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from . import APP_NAME, PUBLISHER, __version__
-from .caster import FirewallError
+from .caster import CastError, FirewallError, catch_up_rate
 from .platform_utils import (
     IS_WINDOWS,
     allow_through_firewall,
     app_data_dir,
     list_monitors,
+    load_settings,
     local_ip_towards,
+    save_settings,
 )
 from .streamer import (
     AUDIO_LOOPBACK,
     AUDIO_NONE,
+    DEFAULT_DELAY,
     DEFAULT_ENCODER,
     DEFAULT_PORT,
     DEFAULT_QUALITY,
+    DELAY_AUTO,
+    DELAY_CHOICES,
     ENCODER_CHOICES,
     QUALITY,
     MirrorStream,
     StreamError,
+    delay_attempts,
     list_dshow_audio_devices,
 )
 
@@ -42,9 +48,14 @@ class App:
         self.busy = False
         self.mirroring = False
         self.device_ids: list[str] = []
+        self.settings = load_settings()
+        self._measuring = False
+        self._skips_seen = 0
+        self._rate = 1.0       # TV playback speed (above 1 while catching up)
+        self._catch_up = True  # False once the TV turned out not to support it
 
         root.title(f"{APP_NAME} {__version__}")
-        root.minsize(520, 440)
+        root.minsize(520, 500)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build()
 
@@ -100,19 +111,28 @@ class App:
                      values=list(ENCODER_CHOICES)).grid(row=5, column=1, columnspan=2,
                                                         sticky="ew", **pad)
 
+        ttk.Label(frm, text="Delay:").grid(row=6, column=0, sticky="w", **pad)
+        self.delay_var = tk.StringVar(value=DEFAULT_DELAY)
+        ttk.Combobox(frm, textvariable=self.delay_var, state="readonly",
+                     values=DELAY_CHOICES).grid(row=6, column=1, columnspan=2,
+                                                sticky="ew", **pad)
+
         self.start_btn = ttk.Button(frm, text="Start mirroring", command=self._toggle)
-        self.start_btn.grid(row=6, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
+        self.start_btn.grid(row=7, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
 
         self.status_var = tk.StringVar(value="Looking for Chromecasts...")
         ttk.Label(frm, textvariable=self.status_var, wraplength=480).grid(
-            row=7, column=0, columnspan=3, sticky="w", **pad)
+            row=8, column=0, columnspan=3, sticky="w", **pad)
+        self.tv_delay_var = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.tv_delay_var).grid(
+            row=9, column=0, columnspan=3, sticky="w", **pad)
 
         self.log_box = tk.Text(frm, height=8, state="disabled", wrap="word")
-        self.log_box.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
-        frm.rowconfigure(8, weight=1)
+        self.log_box.grid(row=10, column=0, columnspan=3, sticky="nsew", **pad)
+        frm.rowconfigure(10, weight=1)
 
         ttk.Label(frm, text=f"{APP_NAME} {__version__} \u00b7 Published by {PUBLISHER}",
-                  foreground="gray").grid(row=9, column=0, columnspan=3, sticky="e",
+                  foreground="gray").grid(row=11, column=0, columnspan=3, sticky="e",
                                           padx=8, pady=(0, 2))
 
     # ------------------------------------------------------------------ helpers
@@ -218,24 +238,60 @@ class App:
         self._set_busy(True, "Starting...")
         threading.Thread(target=self._start_worker, daemon=True, args=(
             uuid, monitor, self.quality_var.get(), self.audio_var.get(),
-            self.encoder_var.get())).start()
+            self.encoder_var.get(), self.delay_var.get())).start()
 
-    def _start_worker(self, uuid, monitor, quality, audio, encoder) -> None:
+    def _delay_order(self, uuid: str, choice: str) -> list[str]:
+        """Delay modes to try. With Auto, what worked on this TV last time goes first."""
+        modes = delay_attempts(choice)
+        remembered = self.settings.get("delay_by_device", {}).get(uuid)
+        if choice == DELAY_AUTO and remembered in modes:
+            modes.remove(remembered)
+            modes.insert(0, remembered)
+        return modes
+
+    def _remember_delay(self, uuid: str, mode: str) -> None:
+        self.settings.setdefault("delay_by_device", {})[uuid] = mode
+        save_settings(self.settings)
+
+    def _start_worker(self, uuid, monitor, quality, audio, encoder, delay_choice) -> None:
         try:
-            self._status("Starting screen capture...")
-            self.stream.start(monitor, quality=quality, audio=audio,
-                              encoder_choice=encoder)
             host = self.casts.host_of(uuid)
-            url = self.stream.url(local_ip_towards(host))
-            self._status("Sending to the Chromecast...")
-            state = self.casts.play(uuid, url, title=APP_NAME,
-                                    fetch_log=self.stream.fetch_log)
-            self.mirroring = True
-            if state == "PLAYING":
-                self._status("Mirroring. Expect the TV to run a few seconds behind the PC.")
-            else:
-                self._status("Sent to the TV, still waiting for the picture. "
-                             "See the details below.")
+            modes = self._delay_order(uuid, delay_choice)
+            for i, mode in enumerate(modes):
+                last = i == len(modes) - 1
+                self._status(f"Starting screen capture ({mode})...")
+                self.stream.start(monitor, quality=quality, audio=audio,
+                                  encoder_choice=encoder, delay=mode)
+                url = self.stream.url(local_ip_towards(host))
+                self._status(f"Sending to the Chromecast ({mode})...")
+                try:
+                    state = self.casts.play(uuid, url, title=APP_NAME,
+                                            fetch_log=self.stream.fetch_log,
+                                            content_type=self.stream.content_type,
+                                            wait_s=30 if last else 15)
+                except FirewallError:
+                    raise  # the same for every mode: trying the others won't help
+                except CastError as exc:
+                    if last:
+                        raise
+                    self._log(f"Delay '{mode}' didn't work on this TV ({exc}). "
+                              "Trying the next one.")
+                    continue
+                if state != "PLAYING" and not last:
+                    self._log(f"Delay '{mode}' didn't start playing on this TV. "
+                              "Trying the next one.")
+                    continue
+                self.mirroring = True
+                self._skips_seen = 0
+                self._rate, self._catch_up = 1.0, True
+                if state == "PLAYING":
+                    if delay_choice == DELAY_AUTO:
+                        self._remember_delay(uuid, mode)
+                    self._status(f"Mirroring. Delay: {mode}.")
+                else:
+                    self._status("Sent to the TV, still waiting for the picture. "
+                                 "See the details below.")
+                return
         except Exception as exc:
             log.exception("start failed")
             self.stream.stop()
@@ -270,6 +326,7 @@ class App:
 
     def _stop(self) -> None:
         self._set_busy(True, "Stopping...")
+        self.tv_delay_var.set("")
 
         def work():
             self.casts.stop_playback()
@@ -296,7 +353,49 @@ class App:
             self._log("Screen capture stopped unexpectedly:")
             self._log(self.stream.recent_errors() or "(no details)")
             self._stop()
+        elif self.mirroring and not self.busy:
+            self._measure_tv_delay()
         self.root.after(2000, self._watchdog)
+
+    def _measure_tv_delay(self) -> None:
+        """Lowest-delay mode only: how far the TV's picture is behind the PC.
+
+        The newest video the PC has sent, minus where the TV says it is playing.
+        """
+        live = self.stream.live
+        if live is None or self._measuring:
+            return
+        if live.skips > self._skips_seen:
+            self._skips_seen = live.skips
+            self._log("The Wi-Fi fell behind for a moment; skipped ahead to keep the "
+                      "delay low.")
+        self._measuring = True
+
+        def work():
+            try:
+                position = self.casts.playback_position()
+                edge = live.edge_for_latest_client()
+                if position is None or edge is None:
+                    return
+                delay = edge - position
+                if not -1.0 <= delay <= 8.0:
+                    return  # not a believable reading: don't act on it
+                delay = max(0.0, delay)
+                rate = catch_up_rate(delay, self._rate)
+                if self._catch_up and rate != self._rate:
+                    if self.casts.set_playback_rate(rate):
+                        self._rate = rate
+                    else:
+                        self._catch_up = False
+                        self._log("This TV can't change playback speed, so it can't "
+                                  "catch up if it falls behind.")
+                note = " (catching up)" if self._rate > 1.0 else ""
+                self._ui(self.tv_delay_var.set,
+                         f"TV is about {delay:.1f} s behind the PC{note}.")
+            finally:
+                self._measuring = False
+
+        threading.Thread(target=self._safe, args=(work,), daemon=True).start()
 
     def _on_close(self) -> None:
         self.status_var.set("Closing...")

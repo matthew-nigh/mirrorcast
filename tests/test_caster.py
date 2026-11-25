@@ -172,3 +172,36 @@ def test_play_error_after_download_suggests_cpu_encoder():
         mgr.play(str(tv.uuid), "http://x", wait_s=2,
                  fetch_log=FakeFetchLog(playlists=3, segments=2))
     assert not isinstance(info.value, FirewallError)
+
+
+def test_catch_up_speeds_up_when_far_behind_and_stops_when_close():
+    from mirrorcast.caster import CATCH_UP_RATE, catch_up_rate
+
+    assert catch_up_rate(3.0, 1.0) == CATCH_UP_RATE
+    assert catch_up_rate(1.2, CATCH_UP_RATE) == CATCH_UP_RATE  # keep going until close
+    assert catch_up_rate(1.2, 1.0) == 1.0  # ...but don't start for a small delay
+    assert catch_up_rate(0.5, CATCH_UP_RATE) == 1.0
+
+
+def test_set_playback_rate_only_when_the_tv_supports_it():
+    mgr, tv = _started([("PLAYING", None)])
+    mgr.play(str(tv.uuid), "http://x", wait_s=2)
+    rates = []
+    status = types.SimpleNamespace(player_state="PLAYING", supported_media_commands=0)
+    tv.media_controller = types.SimpleNamespace(
+        status=status, set_playback_rate=lambda r, timeout=None: rates.append(r))
+    assert mgr.set_playback_rate(1.1) is False and rates == []
+    status.supported_media_commands = 8192 | 1
+    assert mgr.set_playback_rate(1.1) is True and rates == [1.1]
+
+
+def test_playback_position_only_while_playing():
+    mgr, tv = _started([("PLAYING", None)])
+    mgr.play(str(tv.uuid), "http://x", wait_s=2)
+    asked = []
+    status = types.SimpleNamespace(player_state="BUFFERING", adjusted_current_time=12.5)
+    tv.media_controller = types.SimpleNamespace(status=status,
+                                                update_status=lambda: asked.append(1))
+    assert mgr.playback_position() is None and asked
+    status.player_state = "PLAYING"
+    assert mgr.playback_position() == 12.5

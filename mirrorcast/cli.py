@@ -36,6 +36,7 @@ def selftest(seconds: float, test_pattern: bool, encoder: str) -> int:
         print(f"Playlist has {n} segments, CORS={cors}, first segment {size} bytes, "
               f"codecs listed={codecs_ok}")
         ok = n >= 2 and cors == "*" and size > 1000 and codecs_ok and stream.running
+        ok = _selftest_lowest_delay(stream, monitor, encoder, test_pattern) and ok
         print("SELFTEST PASSED" if ok else "SELFTEST FAILED")
         return 0 if ok else 1
     except (StreamError, OSError, IndexError) as exc:
@@ -44,6 +45,30 @@ def selftest(seconds: float, test_pattern: bool, encoder: str) -> int:
         return 1
     finally:
         stream.stop()
+
+
+def _selftest_lowest_delay(stream, monitor, encoder: str, test_pattern: bool) -> bool:
+    """The lowest-delay mode: a live MP4 that starts with a header, then fragments."""
+    from .streamer import DELAY_LOWEST
+
+    print("Checking the lowest-delay stream ...")
+    stream.start(monitor, encoder_choice=encoder, test_pattern=test_pattern,
+                 delay=DELAY_LOWEST)
+    url = stream.url(local_ip_towards(None))
+    started = time.monotonic()
+    data = b""
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        content_type = resp.headers.get("Content-Type")
+        while data.count(b"moof") < 10 and time.monotonic() - started < 10:
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            data += chunk
+    fragments = data.count(b"moof")
+    print(f"Live MP4 ({content_type}): {len(data)} bytes, {fragments} fragments "
+          f"in {time.monotonic() - started:.1f} s")
+    return (content_type == "video/mp4" and data[4:8] == b"ftyp" and fragments >= 10
+            and stream.running)
 
 
 def main(argv=None) -> int:

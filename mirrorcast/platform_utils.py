@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -93,6 +94,25 @@ def app_data_dir() -> str:
     path = os.path.join(base, "MirrorCast")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def load_settings() -> dict:
+    try:
+        with open(os.path.join(app_data_dir(), "settings.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings: dict) -> None:
+    path = os.path.join(app_data_dir(), "settings.json")
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(settings, fh, indent=1)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
 
 
 def local_ip_towards(remote_host: str | None) -> str:
