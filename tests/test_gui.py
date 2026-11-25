@@ -58,14 +58,14 @@ def test_auto_delay_falls_back_and_remembers_what_worked(monkeypatch, tmp_path):
         pytest.skip("no display")
     from mirrorcast.caster import CastError
     from mirrorcast.gui import App
-    from mirrorcast.streamer import DELAY_AUTO, DELAY_LOW, DELAY_LOWEST, MP4_CONTENT_TYPE
+    from mirrorcast.streamer import DELAY_AUTO, DELAY_LOW, DELAY_STANDARD
 
     app = App(root)
     try:
         app.stream = _FakeStream()
 
         def play(uuid, url, content_type, **kw):
-            if content_type == MP4_CONTENT_TYPE:
+            if app.stream.started[-1] == DELAY_LOW:
                 raise CastError("this TV can't play that")
             return "PLAYING"
 
@@ -74,11 +74,11 @@ def test_auto_delay_falls_back_and_remembers_what_worked(monkeypatch, tmp_path):
         args = ("tv-1", app.monitors[0], app.quality_var.get(), app.audio_var.get(),
                 app.encoder_var.get(), DELAY_AUTO)
         app._start_worker(*args)
-        assert app.stream.started == [DELAY_LOWEST, DELAY_LOW] and app.mirroring
-        assert app.settings["delay_by_device"]["tv-1"] == DELAY_LOW
+        assert app.stream.started == [DELAY_LOW, DELAY_STANDARD] and app.mirroring
+        assert app.settings["delay_by_device"]["tv-1"] == DELAY_STANDARD
 
         app.stream.started.clear()
         app._start_worker(*args)  # next time: straight to what worked
-        assert app.stream.started == [DELAY_LOW]
+        assert app.stream.started == [DELAY_STANDARD]
     finally:
         app._on_close()

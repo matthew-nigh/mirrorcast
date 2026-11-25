@@ -1,6 +1,6 @@
 [project]
 name = "mirrorcast"
-version = "1.2.0"
+version = "1.2.1"
 description = "Mirror a Windows screen to a Chromecast"
 authors = [{ name = "M. Nigh" }]
 readme = "README.md"

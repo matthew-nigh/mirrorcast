@@ -139,7 +139,9 @@ def test_bundled_ffmpeg_found(monkeypatch):
 
 
 def test_delay_modes_and_auto_order():
-    assert st.delay_attempts(st.DELAY_AUTO) == [st.DELAY_LOWEST, st.DELAY_LOW, st.DELAY_STANDARD]
+    # the continuous-video mode lagged 30+ s on a real Chromecast: Auto skips it
+    assert st.delay_attempts(st.DELAY_AUTO) == [st.DELAY_LOW, st.DELAY_STANDARD]
+    assert st.delay_attempts(st.DELAY_LOWEST) == [st.DELAY_LOWEST]
     assert st.delay_attempts(st.DELAY_LOW) == [st.DELAY_LOW]
     assert st.DELAY_MODES[st.DELAY_LOWEST].kind == "mp4"
     assert st.DELAY_MODES[st.DELAY_LOW] == st.DelayMode("hls", 1)

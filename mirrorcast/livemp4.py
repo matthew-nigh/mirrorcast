@@ -1,4 +1,4 @@
-"""Lowest-delay mode: one never-ending fragmented MP4 served over HTTP.
+"""Experimental continuous-video mode: one never-ending fragmented MP4 served over HTTP.
 
 ffmpeg writes a fragmented MP4 to a pipe: a header (ftyp + moov) and then a
 fragment (moof + mdat) every ~0.1 s. Each Chromecast that connects gets the

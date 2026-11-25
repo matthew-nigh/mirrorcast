@@ -44,16 +44,20 @@ class DelayMode:
     segment_seconds: float
 
 
-DELAY_LOWEST = "Lowest (about 1-3 s)"
-DELAY_LOW = "Low (about 3-5 s)"
-DELAY_STANDARD = "Standard (about 6-10 s, most reliable)"
+# The Chromecast's built-in player buffers a continuous video like a download
+# before it starts, so on a real TV the "mp4" mode ended up 30+ s behind. It is
+# kept as an option (and for a custom receiver later) but Auto doesn't use it.
+DELAY_LOWEST = "Experimental: continuous video (can lag 30 s on a Chromecast)"
+DELAY_LOW = "Low (about 7 s)"
+DELAY_STANDARD = "Standard (most reliable, about 10 s)"
 DELAY_MODES = {
     DELAY_LOWEST: DelayMode("mp4", KEYFRAME_SECONDS),
     DELAY_LOW: DelayMode("hls", 1),
     DELAY_STANDARD: DelayMode("hls", 2),
 }
 DELAY_AUTO = "Auto (lowest your TV can play)"
-DELAY_CHOICES = [DELAY_AUTO, *DELAY_MODES]
+AUTO_ORDER = [DELAY_LOW, DELAY_STANDARD]
+DELAY_CHOICES = [DELAY_AUTO, DELAY_LOW, DELAY_STANDARD, DELAY_LOWEST]
 DEFAULT_DELAY = DELAY_AUTO
 
 
@@ -61,7 +65,7 @@ def delay_attempts(choice: str) -> list[str]:
     """Delay modes to try, lowest delay first."""
     if choice in DELAY_MODES:
         return [choice]
-    return list(DELAY_MODES)
+    return list(AUTO_ORDER)
 
 # Labels shown in the GUI -> (max width, max height, video bitrate kbit/s)
 QUALITY = {

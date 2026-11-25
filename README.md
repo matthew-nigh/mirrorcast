@@ -13,8 +13,8 @@ Chromecast built in). Pick the Chromecast, pick a screen, press **Start mirrorin
 The app records your screen with ffmpeg (bundled, no separate install),
 turns it into a live HLS video stream, serves that stream on your home network,
 and tells the Chromecast to play it. How far the TV runs behind the PC depends on
-the **Delay** setting (see below): about 1 to 3 seconds at best. Fine for slides,
-photos and videos; still too slow for games.
+the **Delay** setting (see below): about 7 seconds at best. Fine for slides,
+photos and videos; too slow for games or typing.
 
 ## Option A: build a one-file .exe (recommended)
 
@@ -58,15 +58,14 @@ the libraries it needs.
 - **Encoder:** *Auto* tries your graphics card first (NVIDIA, Intel, AMD) and
   falls back to the CPU. Pick *CPU* if Auto gives a broken picture.
 - **Delay:**
-  - *Auto* tries the lowest delay first and falls back if your TV can't play
-    it. It remembers what worked for each Chromecast, so later starts are quick.
-    (To try a lower setting again, pick it by hand once.)
-  - *Lowest (about 1-3 s)* sends one continuous video. While it runs, the app
-    shows how far the TV is behind. If the TV gets more than 1.5 s behind, it
-    plays slightly fast (1.1x) until it has caught up. If the Wi-Fi stalls, the
-    app skips ahead rather than letting the delay grow.
-  - *Low (about 3-5 s)* and *Standard (about 6-10 s)* send the video in 1- or
+  - *Auto* tries *Low* first and falls back to *Standard* if your TV can't
+    play it. It remembers what worked for each Chromecast, so later starts are
+    quick. (To try Low again, pick it by hand once.)
+  - *Low (about 7 s)* and *Standard (about 10 s)* send the video in 1- or
     2-second pieces (HLS). Standard is the most reliable.
+  - *Experimental: continuous video* sends one never-ending video. The
+    Chromecast's built-in player buffers it like a download before starting,
+    so it can end up 30 seconds or more behind. Not recommended.
 
 ## Troubleshooting
 
@@ -84,7 +83,7 @@ the libraries it needs.
   and try again.
 - **Wrong screen shown:** pick the other screen in the list.
 - **Choppy video:** choose 720p, or try a different Encoder option. If it
-  stutters in *Lowest* delay, the Wi-Fi may be too busy: pick *Low*.
+  stutters in *Low* delay, the Wi-Fi may be too busy: pick *Standard*.
 - **Check capture without a Chromecast:** run `MirrorCast.exe --selftest`
   (or `run.bat --selftest`); it records 4 seconds, checks the stream, and
   exits with code 0 if all is well.
@@ -103,7 +102,7 @@ the libraries it needs.
   codecs, and every segment starts with an IDR frame (also on GPU encoders).
   The server counts what it serves (`FetchLog`) so playback problems can be
   told apart from firewall problems.
-- `mirrorcast/livemp4.py`: the *Lowest* delay mode. ffmpeg writes fragmented
+- `mirrorcast/livemp4.py`: the experimental continuous-video mode. ffmpeg writes fragmented
   MP4 (0.1 s fragments, keyframe every second) to a pipe; each TV that connects
   gets the header and then fragments from the next keyframe, with timestamps
   rewritten to start at 0. A TV that falls more than 1 s behind is skipped
